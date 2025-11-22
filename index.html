@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Miva Titans vs UniLag FC - Live Tracker</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Custom Styles -->
+    <style>
+        body { background-color: #000; color: white; }
+        /* Hide scrollbar for cleaner UI */
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        /* Animations */
+        @keyframes pulse-glow {
+            0%, 100% { opacity: 1; box-shadow: 0 0 10px rgba(255, 0, 0, 0.5); }
+            50% { opacity: 0.5; box-shadow: 0 0 20px rgba(255, 0, 0, 0.8); }
+        }
+        .live-dot { animation: pulse-glow 2s infinite; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- Main Application Script -->
+    <script type="text/babel" data-type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, serverTimestamp, addDoc, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        const { useState, useEffect, useRef, Component } = React;
+
+        // --- ICONS COMPONENT ---
+        const Icon = ({ name, size = 24, className = "" }) => {
+            useEffect(() => {
+                lucide.createIcons();
+            }, [name]);
+            return <i data-lucide={name} className={className} style={{ width: size, height: size, display: 'inline-block' }}></i>;
+        };
+
+        // --- SETUP SCREEN (No Code Config) ---
+        const SetupScreen = ({ onSave }) => {
+            const [configInput, setConfigInput] = useState("");
+            const [error, setError] = useState("");
+
+            const handleSave = () => {
+                try {
+                    // Try to find the object in the text even if they paste extra junk
+                    const match = configInput.match(/\{[\s\S]*\}/);
+                    const jsonStr = match ? match[0] : configInput;
+                    
+                    // Relaxed JSON parsing (handling JS object syntax vs strict JSON)
+                    // This is a simple hack to allow copy-pasting from Firebase console directly
+                    const cleanJson = jsonStr.replace(/(['"])?([a-zA-Z0-9_]+)(['"])?:/g, '"$2": ').replace(/'/g, '"');
+                    const config = JSON.parse(cleanJson);
+                    
+                    if (!config.apiKey || !config.projectId) throw new Error("Invalid Config");
+                    
+                    localStorage.setItem("miva_match_firebase_config", JSON.stringify(config));
+                    onSave(config);
+                } catch (e) {
+                    setError("Could not parse config. Please paste the contents of 'firebaseConfig' object found in your Project Settings.");
+                }
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-neutral-900 text-center space-y-6">
+                    <div className="max-w-md w-full space-y-4">
+                        <h1 className="text-3xl font-bold text-amber-500">Match Tracker Setup</h1>
+                        <p className="text-gray-400 text-sm">To make this app live for everyone, it needs a database. <br/>Paste your <b>Firebase Config</b> below.</p>
+                        
+                        <div className="bg-black/50 p-4 rounded text-left text-xs text-gray-500 font-mono">
+                            Example format:<br/>
+                            {`{ apiKey: "AIza...", authDomain: "...", projectId: "..." }`}
+                        </div>
+
+                        <textarea 
+                            value={configInput}
+                            onChange={(e) => setConfigInput(e.target.value)}
+                            placeholder="Paste config here..."
+                            className="w-full h-40 bg-black border border-amber-500/30 rounded p-3 text-xs text-white focus:outline-none focus:border-amber-500"
+                        ></textarea>
+                        
+                        {error && <p className="text-red-500 text-xs">{error}</p>}
+
+                        <button onClick={handleSave} className="w-full bg-amber-600 hover:bg-amber-500 text-white font-bold py-3 rounded transition">
+                            Connect Database & Start
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- MAIN APP LOGIC ---
+        const MatchApp = () => {
+            const [firebaseInitialized, setFirebaseInitialized] = useState(false);
+            const [dbInstance, setDbInstance] = useState(null);
+            const [authInstance, setAuthInstance] = useState(null);
+            const [configMode, setConfigMode] = useState(false);
+
+            // Init Firebase from LocalStorage
+            useEffect(() => {
+                const savedConfig = localStorage.getItem("miva_match_firebase_config");
+                if (savedConfig) {
+                    try {
+                        const config = JSON.parse(savedConfig);
+                        const app = initializeApp(config);
+                        const auth = getAuth(app);
+                        const db = getFirestore(app);
+                        
+                        setAuthInstance(auth);
+                        setDbInstance(db);
+                        
+                        // Anonymous Login
+                        signInAnonymously(auth).catch(e => console.error("Auth Failed", e));
+                        
+                        setFirebaseInitialized(true);
+                    } catch (e) {
+                        console.error("Init failed", e);
+                        setConfigMode(true);
+                    }
+                } else {
+                    setConfigMode(true);
+                }
+            }, []);
+
+            if (configMode) {
+                return <SetupScreen onSave={() => window.location.reload()} />;
+            }
+
+            if (!firebaseInitialized) {
+                return <div className="min-h-screen bg-black flex items-center justify-center text-amber-500 animate-pulse">Connecting to Stadium Feed...</div>;
+            }
+
+            return <LiveTracker db={dbInstance} auth={authInstance} />;
+        };
+
+        // --- LIVE TRACKER COMPONENT ---
+        const LiveTracker = ({ db, auth }) => {
+            // State
+            const [matchState, setMatchState] = useState({
+                status: 'PRE_MATCH',
+                timerRunning: false,
+                timerStartTimestamp: null,
+                accumulatedSeconds: 0,
+                homeStats: { goals: 0, yellowCards: 0, redCards: 0, corners: 0, offsides: 0, subs: 0, possession: 50 },
+                awayStats: { goals: 0, yellowCards: 0, redCards: 0, corners: 0, offsides: 0, subs: 0, possession: 50 },
+                timeline: []
+            });
+            const [isAdmin, setIsAdmin] = useState(false);
+            const [displayTime, setDisplayTime] = useState("00:00");
+            
+            // Modals
+            const [loginOpen, setLoginOpen] = useState(false);
+            const [actionOpen, setActionOpen] = useState(false);
+            const [activeAction, setActiveAction] = useState(null); // { team, type, editingId, initialData }
+
+            // Listen to DB
+            useEffect(() => {
+                const unsub = onSnapshot(doc(db, "matches", "live_game"), (doc) => {
+                    if (doc.exists()) setMatchState(doc.data());
+                    else if (isAdmin) setDoc(doc.ref, matchState); // Create if missing
+                });
+                return () => unsub();
+            }, [db, isAdmin]);
+
+            // Timer
+            useEffect(() => {
+                const timer = setInterval(() => {
+                    if (matchState.status === 'PRE_MATCH') {
+                        setDisplayTime("00:00");
+                        return;
+                    }
+                    let total = matchState.accumulatedSeconds;
+                    if (matchState.timerRunning && matchState.timerStartTimestamp) {
+                        total += Math.floor((Date.now() - matchState.timerStartTimestamp) / 1000);
+                    }
+                    const m = Math.floor(total / 60).toString().padStart(2, '0');
+                    const s = (total % 60).toString().padStart(2, '0');
+                    setDisplayTime(`${m}:${s}`);
+                }, 1000);
+                return () => clearInterval(timer);
+            }, [matchState]);
+
+            // --- ACTIONS ---
+            const handleTimer = () => {
+                const now = Date.now();
+                const ref = doc(db, "matches", "live_game");
+                if (matchState.timerRunning) {
+                    // Pause
+                    const diff = Math.floor((now - matchState.timerStartTimestamp) / 1000);
+                    setDoc(ref, { ...matchState, timerRunning: false, timerStartTimestamp: null, accumulatedSeconds: matchState.accumulatedSeconds + diff });
+                } else {
+                    // Start
+                    const updates = { timerRunning: true, timerStartTimestamp: now };
+                    if (matchState.status === 'PRE_MATCH') {
+                        updates.status = 'FIRST_HALF';
+                        updates.timeline = [{ id: crypto.randomUUID(), type: 'WHISTLE', team: 'NEUTRAL', minute: 0, description: 'Match Started', timestamp: now }, ...matchState.timeline];
+                    }
+                    setDoc(ref, { ...matchState, ...updates });
+                }
+            };
+
+            const submitAction = (data) => {
+                const { playerMain, playerSub } = data;
+                const { team, type, editingId } = activeAction;
+                const now = Date.now();
+                const minute = parseInt(displayTime.split(':')[0]); // approximate
+                
+                let newState = { ...matchState };
+                let desc = "";
+                let playerStr = playerMain;
+
+                // Stats Update Helper
+                const updateStat = (t, field, val) => {
+                    if (t === 'HOME') newState.homeStats[field] += val;
+                    else newState.awayStats[field] += val;
+                };
+
+                if (!editingId) {
+                    // New Event Logic
+                    if (type === 'GOAL') { updateStat(team, 'goals', 1); desc = "GOAL!!!"; }
+                    if (type === 'YELLOW_CARD') { updateStat(team, 'yellowCards', 1); desc = "Yellow Card"; }
+                    if (type === 'RED_CARD') { updateStat(team, 'redCards', 1); desc = "Red Card"; }
+                    if (type === 'CORNER') { updateStat(team, 'corners', 1); desc = "Corner"; playerStr=""; }
+                    if (type === 'OFFSIDE') { updateStat(team, 'offsides', 1); desc = "Offside"; playerStr=""; }
+                    if (type === 'SUBSTITUTION') { 
+                        updateStat(team, 'subs', 1); 
+                        desc = "Substitution"; 
+                        playerStr = `IN: ${playerSub} | OUT: ${playerMain}`; 
+                    }
+
+                    const newEvent = { id: crypto.randomUUID(), type, team, minute, description: desc, player: playerStr, timestamp: now };
+                    newState.timeline = [newEvent, ...newState.timeline];
+                } else {
+                    // Edit Logic (Only updates text, simpler for HTML version)
+                    newState.timeline = newState.timeline.map(e => {
+                        if (e.id === editingId) {
+                            let p = playerMain;
+                            if (e.type === 'SUBSTITUTION') p = `IN: ${playerSub} | OUT: ${playerMain}`;
+                            return { ...e, player: p };
+                        }
+                        return e;
+                    });
+                }
+
+                setDoc(doc(db, "matches", "live_game"), newState);
+                setActionOpen(false);
+            };
+
+            const deleteEvent = (evt) => {
+                if(!confirm("Delete event? Stats will reverse.")) return;
+                let newState = { ...matchState };
+                
+                // Reverse stat
+                const updateStat = (t, field, val) => {
+                    if (t === 'HOME') newState.homeStats[field] = Math.max(0, newState.homeStats[field] - val);
+                    else newState.awayStats[field] = Math.max(0, newState.awayStats[field] - val);
+                };
+
+                if (evt.type === 'GOAL') updateStat(evt.team, 'goals', 1);
+                if (evt.type === 'YELLOW_CARD') updateStat(evt.team, 'yellowCards', 1);
+                if (evt.type === 'RED_CARD') updateStat(evt.team, 'redCards', 1);
+                
+                newState.timeline = newState.timeline.filter(e => e.id !== evt.id);
+                setDoc(doc(db, "matches", "live_game"), newState);
+            };
+
+            return (
+                <div className="relative min-h-screen overflow-hidden">
+                    {/* Background */}
+                    <div className="fixed inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-amber-900/40 via-neutral-950 to-black z-0"></div>
+                    
+                    {/* Navbar */}
+                    <div className="relative z-10 bg-black/40 border-b border-amber-500/20 p-3 flex justify-between items-center backdrop-blur-md">
+                        <div className="flex items-center gap-2 text-xs text-amber-500">
+                            <span className="w-2 h-2 bg-red-600 rounded-full animate-pulse shadow-[0_0_10px_red]"></span> LIVE
+                        </div>
+                        <button onClick={() => isAdmin ? (confirm("Logout?") && setIsAdmin(false)) : setLoginOpen(true)} className="text-xs text-amber-600 border border-amber-600/30 px-3 py-1 rounded hover:bg-amber-900/20">
+                            {isAdmin ? "Admin Mode (Active)" : "Admin Login"}
+                        </button>
+                    </div>
+
+                    <div className="relative z-10 max-w-4xl mx-auto p-4 space-y-6">
+                        
+                        {/* Scoreboard */}
+                        <div className="bg-black/40 border border-amber-500/30 rounded-3xl p-6 text-center backdrop-blur-md shadow-2xl">
+                            <div className="text-amber-200/60 text-xs font-bold tracking-[0.3em] mb-4">CHARITY MATCH</div>
+                            
+                            {/* Main Score Row */}
+                            <div className="flex items-center justify-between">
+                                {/* Home */}
+                                <div className="flex-1 flex flex-col items-center">
+                                    <div className="w-16 h-16 md:w-24 md:h-24 rounded-full bg-gradient-to-br from-red-800 to-black border-2 border-amber-500/50 flex items-center justify-center shadow-lg mb-2">
+                                        <span className="font-bold text-xs md:text-sm">UNILAG</span>
+                                    </div>
+                                    <div className="text-2xl md:text-4xl font-black text-transparent bg-clip-text bg-gradient-to-b from-white to-gray-400">{matchState.homeStats.goals}</div>
+                                </div>
+
+                                {/* Time */}
+                                <div className="px-4">
+                                    <div className="bg-black/60 border border-amber-500/30 px-4 py-1 rounded-lg text-2xl md:text-4xl font-mono font-bold text-green-400 shadow-[0_0_15px_rgba(74,222,128,0.2)]">
+                                        {displayTime}
+                                    </div>
+                                    <div className="text-xs text-amber-500 mt-2 font-bold">{matchState.status.replace('_', ' ')}</div>
+                                </div>
+
+                                {/* Away */}
+                                <div className="flex-1 flex flex-col items-center">
+                                    <div className="w-16 h-16 md:w-24 md:h-24 rounded-full bg-gradient-to-br from-blue-900 to-black border-2 border-amber-500/50 flex items-center justify-center shadow-lg mb-2">
+                                        <span className="font-bold text-xs md:text-sm text-amber-400">MIVA</span>
+                                    </div>
+                                    <div className="text-2xl md:text-4xl font-black text-transparent bg-clip-text bg-gradient-to-b from-amber-200 to-amber-600">{matchState.awayStats.goals}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="grid md:grid-cols-3 gap-6">
+                            {/* Timeline */}
+                            <div className="md:col-span-2 space-y-4">
+                                <h3 className="text-amber-500 font-bold flex items-center gap-2"><Icon name="clock" size={16}/> Timeline</h3>
+                                <div className="bg-black/30 border border-amber-500/10 rounded-xl p-4 max-h-[400px] overflow-y-auto">
+                                    {matchState.timeline.length === 0 && <div className="text-center text-gray-600 text-xs">Match starting soon...</div>}
+                                    {matchState.timeline.map(e => (
+                                        <div key={e.id} className="flex gap-4 mb-3 relative group">
+                                            <div className="text-amber-500 font-mono text-sm w-8 text-right">{e.minute}'</div>
+                                            <div className={`flex-1 p-2 rounded border ${e.team === 'HOME' ? 'bg-red-900/20 border-red-500/20' : e.team === 'AWAY' ? 'bg-blue-900/20 border-blue-500/20' : 'bg-gray-800 border-gray-600'}`}>
+                                                <div className="text-sm font-bold text-white">{e.description}</div>
+                                                <div className="text-xs text-gray-400">{e.player}</div>
+                                            </div>
+                                            {isAdmin && (
+                                                <button onClick={() => deleteEvent(e)} className="absolute right-2 top-2 text-red-500 opacity-0 group-hover:opacity-100"><Icon name="trash-2" size={14}/></button>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Admin / Fan Zone */}
+                            <div className="space-y-6">
+                                {isAdmin && (
+                                    <div className="bg-black/40 border border-amber-500/20 p-4 rounded-xl">
+                                        <div className="text-xs text-green-400 font-bold mb-3 uppercase">Admin Controls</div>
+                                        <button onClick={handleTimer} className={`w-full py-3 rounded font-bold mb-4 ${matchState.timerRunning ? 'bg-yellow-600' : 'bg-green-600'}`}>
+                                            {matchState.timerRunning ? "PAUSE MATCH" : "START MATCH"}
+                                        </button>
+                                        
+                                        {/* Team Controls */}
+                                        <div className="grid grid-cols-2 gap-2 mb-4">
+                                            <div className="text-center">
+                                                <div className="text-xs text-red-500 font-bold mb-1">UNILAG</div>
+                                                <button onClick={() => { setActiveAction({team:'HOME', type:'GOAL'}); setActionOpen(true); }} className="w-full bg-white/10 hover:bg-red-900/50 text-xs p-2 rounded mb-1">Goal</button>
+                                                <button onClick={() => { setActiveAction({team:'HOME', type:'YELLOW_CARD'}); setActionOpen(true); }} className="w-full bg-white/10 hover:bg-yellow-900/50 text-xs p-2 rounded">Card</button>
+                                            </div>
+                                            <div className="text-center">
+                                                <div className="text-xs text-amber-500 font-bold mb-1">MIVA</div>
+                                                <button onClick={() => { setActiveAction({team:'AWAY', type:'GOAL'}); setActionOpen(true); }} className="w-full bg-white/10 hover:bg-blue-900/50 text-xs p-2 rounded mb-1">Goal</button>
+                                                <button onClick={() => { setActiveAction({team:'AWAY', type:'YELLOW_CARD'}); setActionOpen(true); }} className="w-full bg-white/10 hover:bg-yellow-900/50 text-xs p-2 rounded">Card</button>
+                                            </div>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <button onClick={() => {setDoc(doc(db, "matches", "live_game"), {...matchState, status: 'HALFTIME'})}} className="bg-gray-700 text-xs p-2 rounded">Half Time</button>
+                                            <button onClick={() => {setDoc(doc(db, "matches", "live_game"), {...matchState, status: 'FULL_TIME'})}} className="bg-gray-700 text-xs p-2 rounded">End Match</button>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Chat */}
+                                <ChatBox db={db} />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* MODALS */}
+                    {loginOpen && (
+                        <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4">
+                            <div className="bg-gray-900 p-6 rounded-xl w-full max-w-xs">
+                                <h3 className="text-white font-bold mb-4">Admin Access</h3>
+                                <input type="password" id="pinInput" className="w-full bg-black p-2 text-white rounded mb-4 text-center" placeholder="PIN" />
+                                <button onClick={() => {
+                                    if(document.getElementById('pinInput').value === 'Smart9932@&@') { setLoginOpen(false); setIsAdmin(true); }
+                                    else alert("Wrong PIN");
+                                }} className="w-full bg-amber-600 py-2 rounded text-white font-bold">Login</button>
+                                <button onClick={() => setLoginOpen(false)} className="w-full mt-2 text-gray-500 text-xs">Cancel</button>
+                            </div>
+                        </div>
+                    )}
+
+                    {actionOpen && (
+                        <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4">
+                            <div className="bg-gray-900 p-6 rounded-xl w-full max-w-sm">
+                                <h3 className="text-amber-500 font-bold mb-4 uppercase">{activeAction.type} for {activeAction.team}</h3>
+                                <input id="pMain" className="w-full bg-black p-3 text-white rounded mb-2" placeholder="Player Name / Jersey #" />
+                                <button onClick={() => submitAction({ playerMain: document.getElementById('pMain').value })} className="w-full bg-green-600 py-3 rounded text-white font-bold">Confirm</button>
+                                <button onClick={() => setActionOpen(false)} className="w-full mt-2 text-gray-500">Cancel</button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // --- CHAT COMPONENT ---
+        const ChatBox = ({ db }) => {
+            const [msgs, setMsgs] = useState([]);
+            const [txt, setTxt] = useState("");
+            const [name, setName] = useState(localStorage.getItem("miva_chat_name") || "");
+
+            useEffect(() => {
+                const q = query(collection(db, "matches", "live_game", "comments"), orderBy("ts", "desc"), limit(20));
+                return onSnapshot(q, snap => setMsgs(snap.docs.map(d => d.data()).reverse()));
+            }, [db]);
+
+            const send = () => {
+                if(!txt.trim()) return;
+                if(!name) {
+                    const n = prompt("Enter your name to chat:");
+                    if(n) { setName(n); localStorage.setItem("miva_chat_name", n); }
+                    else return;
+                }
+                addDoc(collection(db, "matches", "live_game", "comments"), {
+                    user: name || "Fan", text: txt, ts: serverTimestamp()
+                });
+                setTxt("");
+            };
+
+            return (
+                <div className="bg-black/30 border border-amber-500/10 rounded-xl h-64 flex flex-col">
+                    <div className="p-2 border-b border-white/5 text-xs font-bold text-amber-500 uppercase">Fan Zone</div>
+                    <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {msgs.map((m, i) => (
+                            <div key={i} className="text-sm"><span className="text-amber-600 font-bold text-xs">{m.user}:</span> <span className="text-gray-300">{m.text}</span></div>
+                        ))}
+                    </div>
+                    <div className="p-2 flex gap-2">
+                        <input value={txt} onChange={e => setTxt(e.target.value)} className="flex-1 bg-black/50 text-white text-xs p-2 rounded" placeholder="Say something..." />
+                        <button onClick={send} className="text-amber-500"><Icon name="send" size={16}/></button>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<MatchApp />);
+    </script>
+</body>
+</html>
